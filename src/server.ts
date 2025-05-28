@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket as WSWebSocket, VerifyClientCallbackSync } from 'ws';
-import https from 'https';
+import http from 'http';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -35,31 +35,6 @@ interface Message {
   type: string;
   [key: string]: any;
 }
-
-// SSL Configuration
-const sslOptions = (() => {
-  const paths = [
-    // Try local copies first
-    { key: './ssl/privkey.pem', cert: './ssl/fullchain.pem' },
-    // Fall back to system paths
-    { key: '/etc/letsencrypt/live/ws.textroyale.com/privkey.pem', cert: '/etc/letsencrypt/live/ws.textroyale.com/fullchain.pem' }
-  ];
-  
-  for (const path of paths) {
-    try {
-      if (fs.existsSync(path.key) && fs.existsSync(path.cert)) {
-        return {
-          key: fs.readFileSync(path.key),
-          cert: fs.readFileSync(path.cert)
-        };
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-  
-  throw new Error('SSL certificates not found or not accessible');
-})();
 
 // Global stores
 const sessions = new Map<string, Session>();
@@ -303,8 +278,8 @@ function getAllSessions(): Session[] {
 }
 
 // Server startup
-function startSecureServer(port: number = 3001): void {
-  const server = https.createServer(sslOptions, (req, res) => {
+function startServer(port: number = 3001): void {
+  const server = http.createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -322,7 +297,7 @@ function startSecureServer(port: number = 3001): void {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      service: 'Secure WebSocket Server',
+      service: 'WebSocket Server',
       status: 'running',
       version: '1.0.0'
     }));
@@ -337,7 +312,7 @@ function startSecureServer(port: number = 3001): void {
   });
 
   wss.on('connection', (ws, req) => {
-    console.log(`New secure connection from ${req.socket.remoteAddress}`);
+    console.log(`New connection from ${req.socket.remoteAddress}`);
     
     ws.on('message', (message) => {
       handleMessage(ws, message.toString());
@@ -355,19 +330,19 @@ function startSecureServer(port: number = 3001): void {
 
     sendMessage(ws, {
       type: 'connected',
-      message: 'Secure connection established',
+      message: 'Connection established',
       timestamp: new Date().toISOString()
     });
   });
 
   server.listen(port, () => {
     console.log('='.repeat(60));
-    console.log('🔐 Secure WebSocket Server Started');
+    console.log('🚀 WebSocket Server Started (Behind Nginx SSL)');
     console.log('='.repeat(60));
-    console.log(`📡 Port: ${port}`);
-    console.log(`🌐 Health: https://localhost:${port}/health`);
-    console.log(`📊 Status: https://localhost:${port}/status`);
-    console.log(`🔗 WSS: wss://localhost:${port}`);
+    console.log(`📡 Internal Port: ${port}`);
+    console.log(`🌐 Health: http://localhost:${port}/health`);
+    console.log(`📊 Status: http://localhost:${port}/status`);
+    console.log(`🔗 Public WSS: wss://ws.textroyale.com/`);
     console.log(`🕒 Started: ${new Date().toISOString()}`);
     console.log('='.repeat(60));
   });
@@ -380,7 +355,7 @@ function startSecureServer(port: number = 3001): void {
 }
 
 // Start server
-startSecureServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
+startServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
 
 // Export public API
 export {
@@ -390,5 +365,5 @@ export {
   getSession,
   getAllSessions,
   getStats,
-  startSecureServer
+  startServer
 };
