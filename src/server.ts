@@ -1,7 +1,9 @@
-import { WebSocketServer, WebSocket as WSWebSocket, VerifyClientCallbackSync } from 'ws';
-import http from 'http';
+import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
+import https from 'https';
+import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
+// Interfaces
 interface Session {
   sessionId: string;
   userId: string;
@@ -34,29 +36,37 @@ interface Message {
   [key: string]: any;
 }
 
+// SSL Configuration
+const sslOptions = {
+  key: fs.readFileSync('/etc/letsencrypt/live/ws.textroyale.com/privkey.pem'),
+  cert: fs.readFileSync('/etc/letsencrypt/live/ws.textroyale.com/fullchain.pem'),
+  // Enable if you want to require client certificates
+  // requestCert: true,
+  // rejectUnauthorized: false
+};
+
+// Global stores
 const sessions = new Map<string, Session>();
 const connections = new Map<string, WSWebSocket>();
 const events: Record<string, Function[]> = {};
 
+// Event system
 function on(event: string, callback: (data: any) => void): void {
-  if (!events[event]) {
-    events[event] = [];
-  }
+  if (!events[event]) events[event] = [];
   events[event].push(callback);
 }
 
 function emit(event: string, data: any): void {
-  if (events[event]) {
-    events[event].forEach(callback => {
-      try {
-        callback(data);
-      } catch (error) {
-        console.error(`Error in event callback for ${event}:`, error);
-      }
-    });
-  }
+  events[event]?.forEach(callback => {
+    try {
+      callback(data);
+    } catch (error) {
+      console.error(`Event callback error for ${event}:`, error);
+    }
+  });
 }
 
+// Message handling
 function sendMessage(ws: WSWebSocket, message: Message): void {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(message));
@@ -66,10 +76,9 @@ function sendMessage(ws: WSWebSocket, message: Message): void {
 function handleMessage(ws: WSWebSocket, message: string): void {
   try {
     const data = JSON.parse(message);
-    console.log(`[${new Date().toISOString()}] Received message:`, {
+    console.log(`[${new Date().toISOString()}] Received:`, {
       type: data.type,
-      sessionId: data.sessionId || 'none',
-      hasWalletId: !!data.walletId
+      sessionId: data.sessionId || 'none'
     });
 
     switch (data.type) {
@@ -86,7 +95,7 @@ function handleMessage(ws: WSWebSocket, message: string): void {
         });
         break;
       default:
-        console.log(`[${new Date().toISOString()}] Unknown message type: ${data.type}`);
+        console.warn(`Unknown message type: ${data.type}`);
         sendMessage(ws, {
           type: 'error',
           message: 'Unknown message type',
@@ -94,7 +103,7 @@ function handleMessage(ws: WSWebSocket, message: string): void {
         });
     }
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error parsing message:`, error);
+    console.error(`Message parsing error:`, error);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid message format',
@@ -103,13 +112,14 @@ function handleMessage(ws: WSWebSocket, message: string): void {
   }
 }
 
+// Session management
 function handleInitSession(ws: WSWebSocket, data: any): void {
   const { sessionId } = data;
   
   if (!sessionId) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Session ID is required',
+      message: 'Session ID required',
       timestamp: new Date().toISOString()
     });
     return;
@@ -117,10 +127,10 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
 
   const session = sessions.get(sessionId);
   if (!session) {
-    console.log(`[${new Date().toISOString()}] Invalid session attempt: ${sessionId}`);
+    console.warn(`Invalid session attempt: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
-      message: 'Invalid or expired session',
+      message: 'Invalid session',
       timestamp: new Date().toISOString()
     });
     return;
@@ -136,11 +146,11 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
     type: 'session_initialized',
     userId: session.userId,
     username: session.username,
-    sessionId: sessionId,
+    sessionId,
     timestamp: new Date().toISOString()
   });
 
-  console.log(`[${new Date().toISOString()}] ✅ Session ${sessionId} initialized for user ${session.username}`);
+  console.log(`✅ Session ${sessionId} initialized for ${session.username}`);
 }
 
 function handleWalletConnected(ws: WSWebSocket, data: any): void {
@@ -149,7 +159,7 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
   if (!sessionId || !walletId) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Session ID and wallet ID are required',
+      message: 'Session ID and wallet ID required',
       timestamp: new Date().toISOString()
     });
     return;
@@ -159,7 +169,7 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
   if (!session) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Invalid or expired session',
+      message: 'Invalid session',
       timestamp: new Date().toISOString()
     });
     return;
@@ -170,30 +180,31 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
   session.status = 'wallet_connected';
   session.walletConnectedAt = new Date();
 
-  console.log(`[${new Date().toISOString()}] 💰 Wallet ${walletId} connected for session ${sessionId}`);
+  console.log(`💰 Wallet ${walletId} connected for session ${sessionId}`);
 
   emit('wallet_connected', {
     userId: session.userId,
     chatId: session.chatId,
     username: session.username,
-    walletId: walletId,
+    walletId,
     txnLink: txnLink || '',
-    sessionId: sessionId,
+    sessionId,
     timestamp: new Date().toISOString()
   });
 
   sendMessage(ws, {
     type: 'wallet_connection_received',
-    message: 'Wallet connected successfully!',
+    message: 'Wallet connected!',
     timestamp: new Date().toISOString()
   });
 }
 
+// Cleanup functions
 function cleanupConnection(ws: WSWebSocket): void {
   const sessionId = (ws as any).sessionId;
   if (sessionId) {
     connections.delete(sessionId);
-    console.log(`[${new Date().toISOString()}] 🧹 Cleaned up connection for session ${sessionId}`);
+    console.log(`🧹 Cleaned up connection for session ${sessionId}`);
   }
 }
 
@@ -202,25 +213,23 @@ function cleanupExpiredSessions(): void {
   const expiredSessions: string[] = [];
 
   sessions.forEach((session, sessionId) => {
-    const sessionAge = now.getTime() - session.createdAt.getTime();
-    const oneHour = 60 * 60 * 1000;
-
-    if (sessionAge > oneHour) {
+    if (now.getTime() - session.createdAt.getTime() > 60 * 60 * 1000) {
       expiredSessions.push(sessionId);
     }
   });
 
   expiredSessions.forEach(sessionId => {
-    console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up expired session: ${sessionId}`);
     sessions.delete(sessionId);
     connections.delete(sessionId);
+    console.log(`🗑️ Cleaned up expired session: ${sessionId}`);
   });
 
   if (expiredSessions.length > 0) {
-    console.log(`[${new Date().toISOString()}] 📊 Cleaned up ${expiredSessions.length} expired sessions`);
+    console.log(`📊 Cleaned up ${expiredSessions.length} expired sessions`);
   }
 }
 
+// Utility functions
 function getStats(): ServerStats {
   const memUsage = process.memoryUsage();
   return {
@@ -240,14 +249,15 @@ function getStats(): ServerStats {
 
 function logStats(): void {
   const stats = getStats();
-  console.log(`[${new Date().toISOString()}] 📊 Server Stats:`, {
-    activeSessions: stats.activeSessions,
-    activeConnections: stats.activeConnections,
+  console.log(`📊 Server Stats:`, {
+    sessions: stats.activeSessions,
+    connections: stats.activeConnections,
     uptime: `${Math.floor(stats.uptime / 3600)}h ${Math.floor((stats.uptime % 3600) / 60)}m`,
-    memoryUsage: `${Math.round(stats.memory.used / 1024 / 1024)}MB`
+    memory: `${Math.round(stats.memory.used / 1024 / 1024)}MB`
   });
 }
 
+// Public API
 function createSession(userId: string, chatId: string, username: string): string {
   const sessionId = uuidv4();
   
@@ -264,7 +274,7 @@ function createSession(userId: string, chatId: string, username: string): string
     txnLink: null
   });
 
-  console.log(`[${new Date().toISOString()}] 🆕 Created session ${sessionId} for user ${username} (${userId})`);
+  console.log(`🆕 Created session ${sessionId} for ${username}`);
   return sessionId;
 }
 
@@ -276,16 +286,14 @@ function getAllSessions(): Session[] {
   return Array.from(sessions.values());
 }
 
-function startServer(port: number = 3001): void {
-  const server = http.createServer((req, res) => {
+// Server startup
+function startSecureServer(port: number = 3001): void {
+  const server = https.createServer(sslOptions, (req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'healthy',
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString(),
-        activeSessions: sessions.size,
-        activeConnections: connections.size
+        ...getStats()
       }));
       return;
     }
@@ -298,7 +306,7 @@ function startServer(port: number = 3001): void {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      service: 'Text Royale WebSocket Server',
+      service: 'Secure WebSocket Server',
       status: 'running',
       version: '1.0.0'
     }));
@@ -306,63 +314,59 @@ function startServer(port: number = 3001): void {
 
   const wss = new WebSocketServer({ 
     server,
-    verifyClient: (info: Parameters<VerifyClientCallbackSync>[0]) => {
-      const origin = info.origin;
-      console.log(`[${new Date().toISOString()}] WebSocket connection from origin: ${origin}`);
-      return true;
+    verifyClient: (info) => {
+      console.log(`New connection from ${info.origin}`);
+      return true; // Add authentication logic here
     }
   });
 
-  wss.on('connection', (ws, request) => {
-    const clientIp = request.socket.remoteAddress;
-    console.log(`[${new Date().toISOString()}] New WebSocket connection from ${clientIp}`);
+  wss.on('connection', (ws, req) => {
+    console.log(`New secure connection from ${req.socket.remoteAddress}`);
     
     ws.on('message', (message) => {
       handleMessage(ws, message.toString());
     });
 
     ws.on('close', () => {
-      console.log(`[${new Date().toISOString()}] WebSocket connection closed`);
+      console.log('Connection closed');
       cleanupConnection(ws);
     });
 
     ws.on('error', (error) => {
-      console.error(`[${new Date().toISOString()}] WebSocket error:`, error);
+      console.error('WebSocket error:', error);
       cleanupConnection(ws);
     });
 
     sendMessage(ws, {
       type: 'connected',
-      message: 'WebSocket connection established',
+      message: 'Secure connection established',
       timestamp: new Date().toISOString()
     });
   });
 
   server.listen(port, () => {
     console.log('='.repeat(60));
-    console.log('🚀 Text Royale WebSocket Server Started');
+    console.log('🔐 Secure WebSocket Server Started');
     console.log('='.repeat(60));
     console.log(`📡 Port: ${port}`);
-    console.log(`🌐 Health Check: http://localhost:${port}/health`);
-    console.log(`📊 Status: http://localhost:${port}/status`);
-    console.log(`🔗 WebSocket: ws://localhost:${port}`);
-    console.log(`🕒 Started at: ${new Date().toISOString()}`);
+    console.log(`🌐 Health: https://localhost:${port}/health`);
+    console.log(`📊 Status: https://localhost:${port}/status`);
+    console.log(`🔗 WSS: wss://localhost:${port}`);
+    console.log(`🕒 Started: ${new Date().toISOString()}`);
     console.log('='.repeat(60));
   });
 
-  setInterval(() => {
-    cleanupExpiredSessions();
-  }, 5 * 60 * 1000);
-
-  setInterval(() => {
-    logStats();
-  }, 10 * 60 * 1000);
+  // Cleanup every 5 minutes
+  setInterval(cleanupExpiredSessions, 5 * 60 * 1000);
+  
+  // Log stats every 10 minutes
+  setInterval(logStats, 10 * 60 * 1000);
 }
 
-// Start the server
-startServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
+// Start server
+startSecureServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
 
-// Export for testing or module use
+// Export public API
 export {
   on,
   emit,
@@ -370,5 +374,5 @@ export {
   getSession,
   getAllSessions,
   getStats,
-  startServer
+  startSecureServer
 };
