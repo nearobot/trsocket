@@ -1,4 +1,4 @@
-import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
+import { WebSocketServer, WebSocket as WSWebSocket, VerifyClientCallbackSync } from 'ws';
 import https from 'https';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
@@ -314,7 +314,7 @@ function startSecureServer(port: number = 3001): void {
 
   const wss = new WebSocketServer({ 
     server,
-    verifyClient: (info) => {
+    verifyClient: (info: Parameters<VerifyClientCallbackSync>[0]) => {
       console.log(`New connection from ${info.origin}`);
       return true; // Add authentication logic here
     }
