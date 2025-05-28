@@ -40,6 +40,7 @@ interface Message {
 const sessions = new Map<string, Session>();
 const connections = new Map<string, WSWebSocket>();
 const events: Record<string, Function[]> = {};
+const botConnections = new Set<WSWebSocket>(); // Track bot connections
 
 // Event system
 function on(event: string, callback: (data: any) => void): void {
@@ -57,6 +58,15 @@ function emit(event: string, data: any): void {
   });
 }
 
+// Send message to bot connections
+function sendToBot(message: Message): void {
+  botConnections.forEach(ws => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  });
+}
+
 // Message handling
 function sendMessage(ws: WSWebSocket, message: Message): void {
   if (ws.readyState === ws.OPEN) {
@@ -69,10 +79,17 @@ function handleMessage(ws: WSWebSocket, message: string): void {
     const data = JSON.parse(message);
     console.log(`[${new Date().toISOString()}] Received:`, {
       type: data.type,
-      sessionId: data.sessionId || 'none'
+      sessionId: data.sessionId || 'none',
+      from: (ws as any).isBot ? 'BOT' : 'CLIENT'
     });
 
     switch (data.type) {
+      case 'bot_connect':
+        handleBotConnect(ws, data);
+        break;
+      case 'create_session':
+        handleCreateSession(ws, data);
+        break;
       case 'init_session':
         handleInitSession(ws, data);
         break;
@@ -103,6 +120,55 @@ function handleMessage(ws: WSWebSocket, message: string): void {
   }
 }
 
+// Handle bot connection
+function handleBotConnect(ws: WSWebSocket, data: any): void {
+  (ws as any).isBot = true;
+  botConnections.add(ws);
+  console.log(`🤖 Bot connected. Total bot connections: ${botConnections.size}`);
+  
+  sendMessage(ws, {
+    type: 'bot_connected',
+    message: 'Bot connection established',
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Handle session creation from bot
+function handleCreateSession(ws: WSWebSocket, data: any): void {
+  const { sessionId, userId, chatId, username } = data;
+  
+  if (!sessionId || !userId || !chatId || !username) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Missing required session data',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Create session
+  sessions.set(sessionId, {
+    sessionId,
+    userId,
+    chatId,
+    username,
+    status: 'created',
+    createdAt: new Date(),
+    connectedAt: null,
+    walletConnectedAt: null,
+    walletId: null,
+    txnLink: null
+  });
+
+  console.log(`🆕 Session created by bot: ${sessionId} for ${username} (${userId})`);
+  
+  sendMessage(ws, {
+    type: 'session_created',
+    sessionId,
+    timestamp: new Date().toISOString()
+  });
+}
+
 // Session management
 function handleInitSession(ws: WSWebSocket, data: any): void {
   const { sessionId } = data;
@@ -121,7 +187,7 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
     console.warn(`Invalid session attempt: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
-      message: 'Invalid session',
+      message: 'Invalid or expired session',
       timestamp: new Date().toISOString()
     });
     return;
@@ -173,7 +239,9 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
 
   console.log(`💰 Wallet ${walletId} connected for session ${sessionId}`);
 
-  emit('wallet_connected', {
+  // Send to bot via WebSocket
+  const walletData = {
+    type: 'wallet_connected',
     userId: session.userId,
     chatId: session.chatId,
     username: session.username,
@@ -181,11 +249,14 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
     txnLink: txnLink || '',
     sessionId,
     timestamp: new Date().toISOString()
-  });
+  };
 
+  sendToBot(walletData);
+
+  // Send confirmation to frontend
   sendMessage(ws, {
     type: 'wallet_connection_received',
-    message: 'Wallet connected!',
+    message: 'Wallet connected successfully!',
     timestamp: new Date().toISOString()
   });
 }
@@ -193,9 +264,16 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
 // Cleanup functions
 function cleanupConnection(ws: WSWebSocket): void {
   const sessionId = (ws as any).sessionId;
+  const isBot = (ws as any).isBot;
+  
   if (sessionId) {
     connections.delete(sessionId);
     console.log(`🧹 Cleaned up connection for session ${sessionId}`);
+  }
+  
+  if (isBot) {
+    botConnections.delete(ws);
+    console.log(`🤖 Bot disconnected. Remaining bot connections: ${botConnections.size}`);
   }
 }
 
@@ -243,13 +321,14 @@ function logStats(): void {
   console.log(`📊 Server Stats:`, {
     sessions: stats.activeSessions,
     connections: stats.activeConnections,
+    botConnections: botConnections.size,
     uptime: `${Math.floor(stats.uptime / 3600)}h ${Math.floor((stats.uptime % 3600) / 60)}m`,
     memory: `${Math.round(stats.memory.used / 1024 / 1024)}MB`
   });
 }
 
 // Public API
-function createSession(userId: string, chatId: string, username: string): string {
+function createSessionAPI(userId: string, chatId: string, username: string): string {
   const sessionId = uuidv4();
   
   sessions.set(sessionId, {
@@ -280,6 +359,17 @@ function getAllSessions(): Session[] {
 // Server startup
 function startServer(port: number = 3001): void {
   const server = http.createServer((req, res) => {
+    // Enable CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -297,52 +387,57 @@ function startServer(port: number = 3001): void {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      service: 'WebSocket Server',
+      service: 'Text Royale WebSocket Server',
       status: 'running',
-      version: '1.0.0'
+      version: '1.0.0',
+      activeSessions: sessions.size,
+      botConnections: botConnections.size
     }));
   });
 
   const wss = new WebSocketServer({ 
     server,
     verifyClient: (info: Parameters<VerifyClientCallbackSync>[0]) => {
-      console.log(`New connection from ${info.origin}`);
-      return true; // Add authentication logic here
+      console.log(`[${new Date().toISOString()}] New connection from ${info.origin || 'unknown'}`);
+      return true; // Add authentication logic here if needed
     }
   });
 
   wss.on('connection', (ws, req) => {
-    console.log(`New connection from ${req.socket.remoteAddress}`);
+    const clientIp = req.socket.remoteAddress;
+    console.log(`[${new Date().toISOString()}] New WebSocket connection from ${clientIp}`);
     
     ws.on('message', (message) => {
       handleMessage(ws, message.toString());
     });
 
-    ws.on('close', () => {
-      console.log('Connection closed');
+    ws.on('close', (code, reason) => {
+      console.log(`[${new Date().toISOString()}] Connection closed: ${code} ${reason}`);
       cleanupConnection(ws);
     });
 
     ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
+      console.error(`[${new Date().toISOString()}] WebSocket error:`, error);
       cleanupConnection(ws);
     });
 
+    // Send welcome message
     sendMessage(ws, {
       type: 'connected',
-      message: 'Connection established',
+      message: 'WebSocket connection established',
       timestamp: new Date().toISOString()
     });
   });
 
   server.listen(port, () => {
     console.log('='.repeat(60));
-    console.log('🚀 WebSocket Server Started (Behind Nginx SSL)');
+    console.log('🚀 Text Royale WebSocket Server Started');
     console.log('='.repeat(60));
     console.log(`📡 Internal Port: ${port}`);
     console.log(`🌐 Health: http://localhost:${port}/health`);
     console.log(`📊 Status: http://localhost:${port}/status`);
-    console.log(`🔗 Public WSS: wss://ws.textroyale.com/`);
+    console.log(`🔗 WebSocket: ws://localhost:${port}`);
+    console.log(`🔒 Public WSS: wss://ws.textroyale.com/`);
     console.log(`🕒 Started: ${new Date().toISOString()}`);
     console.log('='.repeat(60));
   });
@@ -361,9 +456,9 @@ startServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
 export {
   on,
   emit,
-  createSession,
+  createSessionAPI as createSession,
   getSession,
   getAllSessions,
   getStats,
   startServer
-};
+}; 
