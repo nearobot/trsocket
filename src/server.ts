@@ -37,13 +37,29 @@ interface Message {
 }
 
 // SSL Configuration
-const sslOptions = {
-  key: fs.readFileSync('/etc/letsencrypt/live/ws.textroyale.com/privkey.pem'),
-  cert: fs.readFileSync('/etc/letsencrypt/live/ws.textroyale.com/fullchain.pem'),
-  // Enable if you want to require client certificates
-  // requestCert: true,
-  // rejectUnauthorized: false
-};
+const sslOptions = (() => {
+  const paths = [
+    // Try local copies first
+    { key: './ssl/privkey.pem', cert: './ssl/fullchain.pem' },
+    // Fall back to system paths
+    { key: '/etc/letsencrypt/live/ws.textroyale.com/privkey.pem', cert: '/etc/letsencrypt/live/ws.textroyale.com/fullchain.pem' }
+  ];
+  
+  for (const path of paths) {
+    try {
+      if (fs.existsSync(path.key) && fs.existsSync(path.cert)) {
+        return {
+          key: fs.readFileSync(path.key),
+          cert: fs.readFileSync(path.cert)
+        };
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+  
+  throw new Error('SSL certificates not found or not accessible');
+})();
 
 // Global stores
 const sessions = new Map<string, Session>();
