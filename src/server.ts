@@ -276,7 +276,7 @@ function getAllSessions(): Session[] {
   return Array.from(sessions.values());
 }
 
-function startServer(port: number = 8080): void {
+function startServer(port: number = 3001): void {
   const server = http.createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -360,7 +360,7 @@ function startServer(port: number = 8080): void {
 }
 
 // Start the server
-startServer(process.env.PORT ? parseInt(process.env.PORT) : 8080);
+startServer(process.env.PORT ? parseInt(process.env.PORT) : 3001);
 
 // Export for testing or module use
 export {
