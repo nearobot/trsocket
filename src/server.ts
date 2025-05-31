@@ -9,7 +9,7 @@ interface Session {
   userId: string;
   chatId: string;
   username: string;
-  status: 'created' | 'connected' | 'wallet_connected';
+  status: 'created' | 'connected' | 'wallet_connected' | 'expired';
   createdAt: Date;
   connectedAt: Date | null;
   walletConnectedAt: Date | null;
@@ -213,11 +213,22 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
   }
 
   const session = sessions.get(sessionId);
-  if (!session) {
-    console.log(`[${new Date().toISOString()}] Invalid session attempt: ${sessionId}`);
+  if (!session || session.status === 'expired') {
+    console.log(`[${new Date().toISOString()}] Invalid or expired session attempt: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid or expired session',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Prevent multiple connections to the same session
+  if (session.status === 'connected' || session.status === 'wallet_connected') {
+    console.log(`[${new Date().toISOString()}] Session already in use: ${sessionId}`);
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Session already in use',
       timestamp: new Date().toISOString()
     });
     return;
@@ -297,7 +308,7 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
 
 // Handle transaction processing request from bot
 function handleProcessTransaction(ws: WSWebSocket, data: any): void {
-  const { sessionId, transactionData, transactionId } = data;
+  const { sessionId, transactionData } = data;
   
   if (!sessionId || !transactionData) {
     sendMessage(ws, {
@@ -312,7 +323,7 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
   if (!session || session.status !== 'wallet_connected') {
     sendMessage(ws, {
       type: 'error',
-      message: 'Invalid session or wallet not connected',
+      message: 'Invalid session, wallet not connected, or session already used',
       timestamp: new Date().toISOString()
     });
     return;
@@ -328,15 +339,12 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
     });
     return;
   }
-
-  const txnId = transactionId || uuidv4();
   
-  console.log(`💳 Sending transaction ${txnId} to frontend for session ${sessionId}`);
+  console.log(`💳 Sending transaction to frontend for session ${sessionId}`);
 
   // Send transaction to frontend for processing
   sendMessage(frontendWs, {
     type: 'process_transaction',
-    transactionId: txnId,
     transactionData,
     timestamp: new Date().toISOString()
   });
@@ -344,7 +352,6 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
   // Confirm to bot that transaction was sent to frontend
   sendMessage(ws, {
     type: 'transaction_sent',
-    transactionId: txnId,
     message: 'Transaction sent to frontend for processing',
     timestamp: new Date().toISOString()
   });
@@ -352,33 +359,35 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
 
 // Handle transaction result from frontend
 function handleTransactionResult(ws: WSWebSocket, data: any): void {
-  const { transactionId, success, signature, txHash, error, sessionId } = data;
+  const { success, signature, txHash, error, sessionId } = data;
   
-  if (!transactionId || success === undefined) {
+  if (success === undefined || !sessionId) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Transaction ID and success status are required',
+      message: 'Success status and session ID are required',
       timestamp: new Date().toISOString()
     });
     return;
   }
 
   const session = sessions.get(sessionId);
-  if (!session) {
+  if (!session || session.status === 'expired') {
     sendMessage(ws, {
       type: 'error',
-      message: 'Invalid session',
+      message: 'Invalid or expired session',
       timestamp: new Date().toISOString()
     });
     return;
   }
 
-  console.log(`${success ? '✅' : '❌'} Transaction ${transactionId} ${success ? 'completed' : 'failed'} for session ${sessionId}`);
+  console.log(`${success ? '✅' : '❌'} Transaction ${success ? 'completed' : 'failed'} for session ${sessionId}`);
+
+  // Expire the session (one-time use)
+  session.status = 'expired';
 
   // Send result to bot
   const resultData = {
     type: 'transaction_completed',
-    transactionId,
     success,
     userId: session.userId,
     chatId: session.chatId,
@@ -396,10 +405,16 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
   // Confirm to frontend
   sendMessage(ws, {
     type: 'transaction_result_received',
-    transactionId,
-    message: 'Transaction result sent to bot',
+    message: 'Transaction result sent to bot. Session is now expired.',
     timestamp: new Date().toISOString()
   });
+
+  // Clean up the session after a short delay
+  setTimeout(() => {
+    sessions.delete(sessionId);
+    connections.delete(sessionId);
+    console.log(`[${new Date().toISOString()}] 🗑️ Cleaned up expired session: ${sessionId}`);
+  }, 30000); // 30 seconds delay
 }
 
 // Cleanup functions
@@ -422,20 +437,31 @@ function cleanupExpiredSessions(): void {
   const now = new Date();
   const expiredSessions: string[] = [];
 
+  // Clean up expired sessions
   sessions.forEach((session, sessionId) => {
-    if (now.getTime() - session.createdAt.getTime() > 60 * 60 * 1000) {
+    const sessionAge = now.getTime() - session.createdAt.getTime();
+    const oneHour = 60 * 60 * 1000;
+
+    // Clean up old sessions or already expired sessions
+    if (sessionAge > oneHour || session.status === 'expired') {
       expiredSessions.push(sessionId);
     }
   });
 
+  // Remove expired sessions
   expiredSessions.forEach(sessionId => {
+    const session = sessions.get(sessionId);
+    if (session?.status === 'expired') {
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up used session: ${sessionId}`);
+    } else {
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up expired session: ${sessionId}`);
+    }
     sessions.delete(sessionId);
     connections.delete(sessionId);
-    console.log(`🗑️ Cleaned up expired session: ${sessionId}`);
   });
 
   if (expiredSessions.length > 0) {
-    console.log(`📊 Cleaned up ${expiredSessions.length} expired sessions`);
+    console.log(`[${new Date().toISOString()}] 📊 Cleaned up ${expiredSessions.length} sessions`);
   }
 }
 
@@ -515,7 +541,11 @@ function startServer(port: number = 3001): void {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'healthy',
-        ...getStats()
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        activeSessions: sessions.size,
+        activeConnections: connections.size,
+        botConnections: botConnections.size
       }));
       return;
     }
@@ -551,6 +581,7 @@ function startServer(port: number = 3001): void {
       }
     }
 
+    // Default response
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       service: 'Text Royale WebSocket Server',
