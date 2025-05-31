@@ -15,6 +15,13 @@ interface Session {
   walletConnectedAt: Date | null;
   walletId: string | null;
   txnLink: string | null;
+  // Transaction data prepared by bot
+  transactionData?: {
+    amount: string;
+    receiver: string;
+    purpose?: string;
+    metadata?: any;
+  };
 }
 
 interface ServerStats {
@@ -96,6 +103,12 @@ function handleMessage(ws: WSWebSocket, message: string): void {
       case 'wallet_connected':
         handleWalletConnected(ws, data);
         break;
+      case 'process_transaction':
+        handleProcessTransaction(ws, data);
+        break;
+      case 'transaction_result':
+        handleTransactionResult(ws, data);
+        break;
       case 'ping':
         sendMessage(ws, { 
           type: 'pong',
@@ -103,7 +116,7 @@ function handleMessage(ws: WSWebSocket, message: string): void {
         });
         break;
       default:
-        console.warn(`Unknown message type: ${data.type}`);
+        console.log(`[${new Date().toISOString()}] Unknown message type: ${data.type}`);
         sendMessage(ws, {
           type: 'error',
           message: 'Unknown message type',
@@ -135,18 +148,30 @@ function handleBotConnect(ws: WSWebSocket, data: any): void {
 
 // Handle session creation from bot
 function handleCreateSession(ws: WSWebSocket, data: any): void {
-  const { sessionId, userId, chatId, username } = data;
+  const { sessionId, userId, chatId, username, transactionData } = data;
   
   if (!sessionId || !userId || !chatId || !username) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Missing required session data',
+      message: 'Missing required session data (sessionId, userId, chatId, username)',
       timestamp: new Date().toISOString()
     });
     return;
   }
 
-  // Create session
+  // Validate transaction data if provided
+  if (transactionData) {
+    if (!transactionData.amount || !transactionData.receiver) {
+      sendMessage(ws, {
+        type: 'error',
+        message: 'Transaction data must include amount and receiver',
+        timestamp: new Date().toISOString()
+      });
+      return;
+    }
+  }
+
+  // Create session with transaction data
   sessions.set(sessionId, {
     sessionId,
     userId,
@@ -157,14 +182,19 @@ function handleCreateSession(ws: WSWebSocket, data: any): void {
     connectedAt: null,
     walletConnectedAt: null,
     walletId: null,
-    txnLink: null
+    txnLink: null,
+    transactionData: transactionData || undefined
   });
 
   console.log(`🆕 Session created by bot: ${sessionId} for ${username} (${userId})`);
+  if (transactionData) {
+    console.log(`💰 Transaction data included: ${transactionData.amount} to ${transactionData.receiver}`);
+  }
   
   sendMessage(ws, {
     type: 'session_created',
     sessionId,
+    hasTransactionData: !!transactionData,
     timestamp: new Date().toISOString()
   });
 }
@@ -176,7 +206,7 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
   if (!sessionId) {
     sendMessage(ws, {
       type: 'error',
-      message: 'Session ID required',
+      message: 'Session ID is required',
       timestamp: new Date().toISOString()
     });
     return;
@@ -184,7 +214,7 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
 
   const session = sessions.get(sessionId);
   if (!session) {
-    console.warn(`Invalid session attempt: ${sessionId}`);
+    console.log(`[${new Date().toISOString()}] Invalid session attempt: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid or expired session',
@@ -199,15 +229,19 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
   session.status = 'connected';
   session.connectedAt = new Date();
 
+  console.log(`[${new Date().toISOString()}] ✅ Session ${sessionId} initialized for user ${session.username}`);
+  if (session.transactionData) {
+    console.log(`💰 Transaction data available: ${session.transactionData.amount} to ${session.transactionData.receiver}`);
+  }
+
   sendMessage(ws, {
     type: 'session_initialized',
     userId: session.userId,
     username: session.username,
-    sessionId,
+    sessionId: sessionId,
+    transactionData: session.transactionData || null,
     timestamp: new Date().toISOString()
   });
-
-  console.log(`✅ Session ${sessionId} initialized for ${session.username}`);
 }
 
 function handleWalletConnected(ws: WSWebSocket, data: any): void {
@@ -257,6 +291,113 @@ function handleWalletConnected(ws: WSWebSocket, data: any): void {
   sendMessage(ws, {
     type: 'wallet_connection_received',
     message: 'Wallet connected successfully!',
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Handle transaction processing request from bot
+function handleProcessTransaction(ws: WSWebSocket, data: any): void {
+  const { sessionId, transactionData, transactionId } = data;
+  
+  if (!sessionId || !transactionData) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Session ID and transaction data are required',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session || session.status !== 'wallet_connected') {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Invalid session or wallet not connected',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Get the frontend connection
+  const frontendWs = connections.get(sessionId);
+  if (!frontendWs) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Frontend not connected',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  const txnId = transactionId || uuidv4();
+  
+  console.log(`💳 Sending transaction ${txnId} to frontend for session ${sessionId}`);
+
+  // Send transaction to frontend for processing
+  sendMessage(frontendWs, {
+    type: 'process_transaction',
+    transactionId: txnId,
+    transactionData,
+    timestamp: new Date().toISOString()
+  });
+
+  // Confirm to bot that transaction was sent to frontend
+  sendMessage(ws, {
+    type: 'transaction_sent',
+    transactionId: txnId,
+    message: 'Transaction sent to frontend for processing',
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Handle transaction result from frontend
+function handleTransactionResult(ws: WSWebSocket, data: any): void {
+  const { transactionId, success, signature, txHash, error, sessionId } = data;
+  
+  if (!transactionId || success === undefined) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Transaction ID and success status are required',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Invalid session',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  console.log(`${success ? '✅' : '❌'} Transaction ${transactionId} ${success ? 'completed' : 'failed'} for session ${sessionId}`);
+
+  // Send result to bot
+  const resultData = {
+    type: 'transaction_completed',
+    transactionId,
+    success,
+    userId: session.userId,
+    chatId: session.chatId,
+    username: session.username,
+    walletId: session.walletId,
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...(success && signature && { signature }),
+    ...(success && txHash && { txHash }),
+    ...(error && { error })
+  };
+
+  sendToBot(resultData);
+
+  // Confirm to frontend
+  sendMessage(ws, {
+    type: 'transaction_result_received',
+    transactionId,
+    message: 'Transaction result sent to bot',
     timestamp: new Date().toISOString()
   });
 }
@@ -385,6 +526,31 @@ function startServer(port: number = 3001): void {
       return;
     }
 
+    // Get transaction data for a specific session
+    if (req.url?.startsWith('/session/') && req.url.includes('/transaction')) {
+      const sessionId = req.url.split('/')[2];
+      if (sessionId) {
+        const session = sessions.get(sessionId);
+        if (session && session.transactionData) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            sessionId,
+            transactionData: session.transactionData,
+            status: session.status,
+            timestamp: new Date().toISOString()
+          }));
+          return;
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Session not found or no transaction data',
+            timestamp: new Date().toISOString()
+          }));
+          return;
+        }
+      }
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       service: 'Text Royale WebSocket Server',
@@ -436,6 +602,7 @@ function startServer(port: number = 3001): void {
     console.log(`📡 Internal Port: ${port}`);
     console.log(`🌐 Health: http://localhost:${port}/health`);
     console.log(`📊 Status: http://localhost:${port}/status`);
+    console.log(`💳 Session Transaction: http://localhost:${port}/session/{sessionId}/transaction`);
     console.log(`🔗 WebSocket: ws://localhost:${port}`);
     console.log(`🔒 Public WSS: wss://ws.textroyale.com/`);
     console.log(`🕒 Started: ${new Date().toISOString()}`);
