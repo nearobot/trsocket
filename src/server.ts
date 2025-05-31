@@ -67,9 +67,20 @@ function emit(event: string, data: any): void {
 
 // Send message to bot connections
 function sendToBot(message: Message): void {
+  console.log(`[${new Date().toISOString()}] 📤 Sending to bots:`, message.type, `(${botConnections.size} bots)`);
+  
+  if (botConnections.size === 0) {
+    console.log(`[${new Date().toISOString()}] ⚠️ No bot connections available!`);
+    return;
+  }
+
   botConnections.forEach(ws => {
     if (ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify(message));
+      console.log(`[${new Date().toISOString()}] ✅ Message sent to bot`);
+    } else {
+      console.log(`[${new Date().toISOString()}] ❌ Bot connection not open, removing...`);
+      botConnections.delete(ws);
     }
   });
 }
@@ -84,10 +95,12 @@ function sendMessage(ws: WSWebSocket, message: Message): void {
 function handleMessage(ws: WSWebSocket, message: string): void {
   try {
     const data = JSON.parse(message);
-    console.log(`[${new Date().toISOString()}] Received:`, {
+    console.log(`[${new Date().toISOString()}] 📥 Received message:`, {
       type: data.type,
       sessionId: data.sessionId || 'none',
-      from: (ws as any).isBot ? 'BOT' : 'CLIENT'
+      from: (ws as any).isBot ? 'BOT' : 'CLIENT',
+      hasTransactionData: !!data.transactionData,
+      success: data.success
     });
 
     switch (data.type) {
@@ -116,7 +129,7 @@ function handleMessage(ws: WSWebSocket, message: string): void {
         });
         break;
       default:
-        console.log(`[${new Date().toISOString()}] Unknown message type: ${data.type}`);
+        console.log(`[${new Date().toISOString()}] ❌ Unknown message type: ${data.type}`);
         sendMessage(ws, {
           type: 'error',
           message: 'Unknown message type',
@@ -124,7 +137,7 @@ function handleMessage(ws: WSWebSocket, message: string): void {
         });
     }
   } catch (error) {
-    console.error(`Message parsing error:`, error);
+    console.error(`[${new Date().toISOString()}] ❌ Message parsing error:`, error);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid message format',
@@ -359,9 +372,12 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
 
 // Handle transaction result from frontend
 function handleTransactionResult(ws: WSWebSocket, data: any): void {
+  console.log(`[${new Date().toISOString()}] 📥 Received transaction result:`, data);
+  
   const { success, signature, txHash, error, sessionId } = data;
   
   if (success === undefined || !sessionId) {
+    console.log(`[${new Date().toISOString()}] ❌ Missing required fields - success: ${success}, sessionId: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
       message: 'Success status and session ID are required',
@@ -372,6 +388,7 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
 
   const session = sessions.get(sessionId);
   if (!session || session.status === 'expired') {
+    console.log(`[${new Date().toISOString()}] ❌ Invalid session - exists: ${!!session}, status: ${session?.status}`);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid or expired session',
@@ -380,7 +397,7 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
     return;
   }
 
-  console.log(`${success ? '✅' : '❌'} Transaction ${success ? 'completed' : 'failed'} for session ${sessionId}`);
+  console.log(`[${new Date().toISOString()}] ${success ? '✅' : '❌'} Transaction ${success ? 'completed' : 'failed'} for session ${sessionId}`);
 
   // Expire the session (one-time use)
   session.status = 'expired';
@@ -400,6 +417,7 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
     ...(error && { error })
   };
 
+  console.log(`[${new Date().toISOString()}] 📤 Preparing to send result to bot:`, resultData);
   sendToBot(resultData);
 
   // Confirm to frontend
