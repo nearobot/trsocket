@@ -15,6 +15,7 @@ interface Session {
   walletConnectedAt: Date | null;
   walletId: string | null;
   txnLink: string | null;
+  disconnectPurpose?: string;
   // Transaction data prepared by bot
   transactionData?: {
     amount: string;
@@ -110,11 +111,17 @@ function handleMessage(ws: WSWebSocket, message: string): void {
       case 'create_session':
         handleCreateSession(ws, data);
         break;
+      case 'create_disconnect_session':
+        handleCreateDisconnectSession(ws, data);
+        break;
       case 'init_session':
         handleInitSession(ws, data);
         break;
       case 'wallet_connected':
         handleWalletConnected(ws, data);
+        break;
+      case 'wallet_disconnected':
+        handleWalletDisconnected(ws, data);
         break;
       case 'process_transaction':
         handleProcessTransaction(ws, data);
@@ -161,7 +168,7 @@ function handleBotConnect(ws: WSWebSocket, data: any): void {
 
 // Handle session creation from bot
 function handleCreateSession(ws: WSWebSocket, data: any): void {
-  const { sessionId, userId, chatId, username, transactionData } = data;
+  const { sessionId, userId, chatId, username, transactionData, disconnectPurpose } = data;
   
   if (!sessionId || !userId || !chatId || !username) {
     sendMessage(ws, {
@@ -184,7 +191,7 @@ function handleCreateSession(ws: WSWebSocket, data: any): void {
     }
   }
 
-  // Create session with transaction data
+  // Create session with transaction data and disconnect purpose
   sessions.set(sessionId, {
     sessionId,
     userId,
@@ -196,6 +203,7 @@ function handleCreateSession(ws: WSWebSocket, data: any): void {
     walletConnectedAt: null,
     walletId: null,
     txnLink: null,
+    disconnectPurpose: disconnectPurpose || undefined,
     transactionData: transactionData || undefined
   });
 
@@ -203,13 +211,112 @@ function handleCreateSession(ws: WSWebSocket, data: any): void {
   if (transactionData) {
     console.log(`💰 Transaction data included: ${transactionData.amount} to ${transactionData.receiver}`);
   }
+  if (disconnectPurpose) {
+    console.log(`🎯 Disconnect purpose: ${disconnectPurpose}`);
+  }
   
   sendMessage(ws, {
     type: 'session_created',
     sessionId,
     hasTransactionData: !!transactionData,
+    disconnectPurpose: disconnectPurpose || null,
     timestamp: new Date().toISOString()
   });
+}
+
+// Handle disconnect session creation from bot
+function handleCreateDisconnectSession(ws: WSWebSocket, data: any): void {
+  const { sessionId, userId, chatId, username } = data;
+  
+  if (!sessionId || !userId || !chatId || !username) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Missing required data (sessionId, userId, chatId, username)',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Create disconnect session (no transaction data, just for wallet disconnection)
+  sessions.set(sessionId, {
+    sessionId,
+    userId,
+    chatId,
+    username,
+    status: 'created',
+    createdAt: new Date(),
+    connectedAt: null,
+    walletConnectedAt: null,
+    walletId: null,
+    txnLink: null,
+    disconnectPurpose: 'wallet_disconnect'
+  });
+
+  console.log(`🔓 Disconnect session created: ${sessionId} for ${username} (${userId})`);
+  
+  sendMessage(ws, {
+    type: 'disconnect_session_created',
+    sessionId,
+    purpose: 'wallet_disconnect',
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Handle wallet disconnection
+function handleWalletDisconnected(ws: WSWebSocket, data: any): void {
+  const { sessionId, reason } = data;
+  
+  if (!sessionId) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Session ID is required',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Invalid session',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+
+  console.log(`🔓 Wallet disconnected for session ${sessionId}. Reason: ${reason || 'User requested'}`);
+
+  // Expire the session (one-time use)
+  session.status = 'expired';
+
+  // Send disconnection result to bot
+  const disconnectData = {
+    type: 'wallet_disconnected',
+    userId: session.userId,
+    chatId: session.chatId,
+    username: session.username,
+    walletId: session.walletId,
+    sessionId,
+    reason: reason || 'User requested disconnection',
+    timestamp: new Date().toISOString()
+  };
+
+  sendToBot(disconnectData);
+
+  // Confirm to frontend
+  sendMessage(ws, {
+    type: 'wallet_disconnection_received',
+    message: 'Wallet disconnection confirmed. Session is now expired.',
+    timestamp: new Date().toISOString()
+  });
+
+  // Clean up the session after a short delay
+  setTimeout(() => {
+    console.log(`[${new Date().toISOString()}] 🗑️ Cleaned up disconnect session: ${sessionId}`);
+    sessions.delete(sessionId);
+    connections.delete(sessionId);
+  }, 10000); // 10 seconds delay
 }
 
 // Session management
@@ -264,6 +371,7 @@ function handleInitSession(ws: WSWebSocket, data: any): void {
     username: session.username,
     sessionId: sessionId,
     transactionData: session.transactionData || null,
+    disconnectPurpose: session.disconnectPurpose || null,
     timestamp: new Date().toISOString()
   });
 }
@@ -411,6 +519,7 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
     username: session.username,
     walletId: session.walletId,
     sessionId,
+    disconnectPurpose: session.disconnectPurpose,
     timestamp: new Date().toISOString(),
     ...(success && signature && { signature }),
     ...(success && txHash && { txHash }),
@@ -429,9 +538,14 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
 
   // Clean up the session after a short delay
   setTimeout(() => {
+    const cleanupSession = sessions.get(sessionId);
+    if (cleanupSession?.disconnectPurpose) {
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaned up session: ${sessionId} (Purpose: ${cleanupSession.disconnectPurpose})`);
+    } else {
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaned up expired session: ${sessionId}`);
+    }
     sessions.delete(sessionId);
     connections.delete(sessionId);
-    console.log(`[${new Date().toISOString()}] 🗑️ Cleaned up expired session: ${sessionId}`);
   }, 30000); // 30 seconds delay
 }
 
@@ -470,9 +584,11 @@ function cleanupExpiredSessions(): void {
   expiredSessions.forEach(sessionId => {
     const session = sessions.get(sessionId);
     if (session?.status === 'expired') {
-      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up used session: ${sessionId}`);
+      const purposeText = session.disconnectPurpose ? ` (Purpose: ${session.disconnectPurpose})` : '';
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up used session: ${sessionId}${purposeText}`);
     } else {
-      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up expired session: ${sessionId}`);
+      const purposeText = session?.disconnectPurpose ? ` (Purpose: ${session.disconnectPurpose})` : '';
+      console.log(`[${new Date().toISOString()}] 🗑️ Cleaning up expired session: ${sessionId}${purposeText}`);
     }
     sessions.delete(sessionId);
     connections.delete(sessionId);
@@ -513,7 +629,7 @@ function logStats(): void {
 }
 
 // Public API
-function createSessionAPI(userId: string, chatId: string, username: string): string {
+function createSessionAPI(userId: string, chatId: string, username: string, disconnectPurpose?: string): string {
   const sessionId = uuidv4();
   
   sessions.set(sessionId, {
@@ -526,10 +642,14 @@ function createSessionAPI(userId: string, chatId: string, username: string): str
     connectedAt: null,
     walletConnectedAt: null,
     walletId: null,
-    txnLink: null
+    txnLink: null,
+    disconnectPurpose: disconnectPurpose || undefined
   });
 
   console.log(`🆕 Created session ${sessionId} for ${username}`);
+  if (disconnectPurpose) {
+    console.log(`🎯 Disconnect purpose: ${disconnectPurpose}`);
+  }
   return sessionId;
 }
 
