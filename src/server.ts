@@ -264,9 +264,12 @@ function handleCreateDisconnectSession(ws: WSWebSocket, data: any): void {
 
 // Handle wallet disconnection
 function handleWalletDisconnected(ws: WSWebSocket, data: any): void {
+  console.log(`[${new Date().toISOString()}] 📥 Received wallet disconnection:`, data);
+  
   const { sessionId, reason } = data;
   
   if (!sessionId) {
+    console.log(`[${new Date().toISOString()}] ❌ Missing session ID in disconnection request`);
     sendMessage(ws, {
       type: 'error',
       message: 'Session ID is required',
@@ -277,6 +280,7 @@ function handleWalletDisconnected(ws: WSWebSocket, data: any): void {
 
   const session = sessions.get(sessionId);
   if (!session) {
+    console.log(`[${new Date().toISOString()}] ❌ Invalid session for disconnection: ${sessionId}`);
     sendMessage(ws, {
       type: 'error',
       message: 'Invalid session',
@@ -285,12 +289,15 @@ function handleWalletDisconnected(ws: WSWebSocket, data: any): void {
     return;
   }
 
-  console.log(`🔓 Wallet disconnected for session ${sessionId}. Reason: ${reason || 'User requested'}`);
+  console.log(`[${new Date().toISOString()}] 🔓 Processing wallet disconnection for session ${sessionId}`);
+  console.log(`[${new Date().toISOString()}] 👤 User: ${session.username} (${session.userId})`);
+  console.log(`[${new Date().toISOString()}] 💼 Wallet: ${session.walletId || 'unknown'}`);
+  console.log(`[${new Date().toISOString()}] 📝 Reason: ${reason || 'User requested'}`);
 
   // Expire the session (one-time use)
   session.status = 'expired';
 
-  // Send disconnection result to bot
+  // Prepare disconnection data for bot
   const disconnectData = {
     type: 'wallet_disconnected',
     userId: session.userId,
@@ -302,14 +309,17 @@ function handleWalletDisconnected(ws: WSWebSocket, data: any): void {
     timestamp: new Date().toISOString()
   };
 
+  console.log(`[${new Date().toISOString()}] 📤 Sending disconnection notification to bot:`, disconnectData);
   sendToBot(disconnectData);
 
-  // Confirm to frontend
+  // Send confirmation back to frontend
   sendMessage(ws, {
     type: 'wallet_disconnection_received',
-    message: 'Wallet disconnection confirmed. Session is now expired.',
+    message: 'Wallet disconnection confirmed. Notification sent to bot.',
     timestamp: new Date().toISOString()
   });
+
+  console.log(`[${new Date().toISOString()}] ✅ Wallet disconnection processed successfully`);
 
   // Clean up the session after a short delay
   setTimeout(() => {
