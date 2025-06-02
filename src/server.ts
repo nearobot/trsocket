@@ -492,7 +492,7 @@ function handleProcessTransaction(ws: WSWebSocket, data: any): void {
 function handleTransactionResult(ws: WSWebSocket, data: any): void {
   console.log(`[${new Date().toISOString()}] 📥 Received transaction result:`, data);
   
-  const { success, signature, txHash, error, sessionId } = data;
+  const { success, signature, txHash, error, sessionId, walletId } = data;
   
   if (success === undefined || !sessionId) {
     console.log(`[${new Date().toISOString()}] ❌ Missing required fields - success: ${success}, sessionId: ${sessionId}`);
@@ -527,11 +527,11 @@ function handleTransactionResult(ws: WSWebSocket, data: any): void {
     userId: session.userId,
     chatId: session.chatId,
     username: session.username,
-    walletId: session.walletId,
     sessionId,
     disconnectPurpose: session.disconnectPurpose,
     timestamp: new Date().toISOString(),
     ...(success && signature && { signature }),
+    ...(walletId && { walletId }),
     ...(success && txHash && { txHash }),
     ...(error && { error })
   };
